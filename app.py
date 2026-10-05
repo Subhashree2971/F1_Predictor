@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -20,6 +21,7 @@ APP_ROOT = Path(__file__).resolve().parent
 DATA_DIR = APP_ROOT / "data"
 HISTORICAL_PATH = DATA_DIR / "f1_ml_training.csv"
 LATEST_PATH = DATA_DIR / "F1_2025_2026_Cleaned_Dataset.csv"
+TEAM_FILE_EXCLUSIONS = {HISTORICAL_PATH.name, LATEST_PATH.name}
 FEATURES = [
     "total_points",
     "races_started",
@@ -32,6 +34,7 @@ FEATURES = [
     "championship_points",
     "championship_wins",
 ]
+TEAM_FEATURES = ["Points", "Wins", "Podiums", "AvgFinish"]
 RED = "#E10600"
 SLATE = "#111318"
 TEXT = "#F4F4F5"
@@ -40,7 +43,7 @@ GREEN = "#62E6A8"
 AMBER = "#FFC857"
 
 st.set_page_config(
-    page_title="F1 Championship Predictor Suite",
+    page_title="Formula One Championship Predictor",
     page_icon="🏁",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -63,10 +66,10 @@ st.markdown(
 .hero-kicker { font-family: 'Barlow Condensed', sans-serif; letter-spacing: .22em; color: #ff6a63; font-size: .85rem; text-transform: uppercase; }
 .hero h1 { margin: .45rem 0 .35rem; font-family: 'Barlow Condensed', sans-serif; letter-spacing: .03em; line-height: .93; font-size: clamp(2.35rem, 6vw, 5.7rem); font-weight: 800; color: white; max-width: 800px; }
 .hero p { color: #c3cbd5; max-width: 680px; font-size: 1rem; margin: 0; }
-.car-card { position: absolute; right: 7%; bottom: 18px; width: 230px; height: 88px; border: 1px solid rgba(255,255,255,.2); border-radius: 16px 16px 7px 7px; background: linear-gradient(160deg, #f21a13, #870600); transform: translateY(130px) rotate(-4deg); animation: car-in 1.25s cubic-bezier(.2,.85,.25,1) .1s forwards; box-shadow: 0 18px 35px rgba(0,0,0,.35), 0 0 34px rgba(225,6,0,.28); }
+.car-card { position: absolute; left: -250px; bottom: 18px; width: 230px; height: 88px; border: 1px solid rgba(255,255,255,.2); border-radius: 16px 16px 7px 7px; background: linear-gradient(160deg, #f21a13, #870600); transform: rotate(-4deg); animation: drive-across 6.5s cubic-bezier(.2,.7,.25,1) .15s infinite; box-shadow: 0 18px 35px rgba(0,0,0,.35), 0 0 34px rgba(225,6,0,.28); z-index: 2; }
 .car-card:before { content: 'F1//PREDICTOR'; position: absolute; left: 18px; top: 12px; font: 700 12px 'Barlow Condensed', sans-serif; letter-spacing: .18em; color: rgba(255,255,255,.92); }
 .car-card:after { content: ''; position: absolute; left: 30px; right: 28px; bottom: 18px; height: 16px; border-radius: 18px 28px 6px 6px; background: #101318; box-shadow: -22px 8px 0 -3px #0b0d10, 68px 8px 0 -3px #0b0d10, 35px -14px 0 -3px #f5f5f5; }
-@keyframes car-in { 0% { transform: translateY(130px) rotate(-4deg); opacity: 0; } 100% { transform: translateY(0) rotate(-4deg); opacity: 1; } }
+@keyframes drive-across { 0% { left: -250px; opacity: 0; } 10% { opacity: 1; } 82% { opacity: 1; } 100% { left: calc(100% + 40px); opacity: 0; } }
 @keyframes scan { 0% { transform: translateX(-80%) skewX(-28deg); opacity: 0; } 100% { transform: translateX(0) skewX(-28deg); opacity: 1; } }
 .section-kicker { color: #ff7069; font-family: 'Barlow Condensed', sans-serif; text-transform: uppercase; letter-spacing: .16em; font-size: .76rem; font-weight: 700; }
 .section-title { font-family: 'Barlow Condensed', sans-serif; text-transform: uppercase; letter-spacing: .03em; font-size: 2rem; font-weight: 700; margin: .15rem 0 .5rem; }
@@ -92,7 +95,7 @@ div[data-baseweb="select"] > div { background: #15191f; border-color: #3a424e; }
 @keyframes lift { from { transform: translateY(35px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 .fine-print { color: var(--muted); font-size: .78rem; line-height: 1.45; }
 .alert-strip { border-left: 4px solid var(--red); background: rgba(225,6,0,.1); border-radius: 8px; padding: .75rem .9rem; color: #f2c4c2; }
-@media (max-width: 800px) { .block-container { padding: 1rem .75rem 3rem; } .hero { padding: 1.35rem 1rem 1.1rem; } .car-card { position: relative; right: auto; bottom: auto; width: 190px; margin: 1rem 0 .2rem auto; height: 66px; } .hero h1 { font-size: 3rem; } .podium-wrap { height: 180px; } }
+@media (max-width: 800px) { .block-container { padding: 1rem .75rem 3rem; } .hero { padding: 1.35rem 1rem 1.1rem; min-height: 270px; } .car-card { width: 190px; height: 66px; bottom: 18px; } .hero h1 { font-size: 3rem; max-width: 90%; } .podium-wrap { height: 180px; } }
 @media (prefers-reduced-motion: reduce) { *, *:before, *:after { animation: none !important; transition: none !important; } }
 </style>
 """,
@@ -115,6 +118,22 @@ def load_raw_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     if not HISTORICAL_PATH.exists() or not LATEST_PATH.exists():
         raise FileNotFoundError("Place both supplied CSV files in the data/ folder before launching the app.")
     return pd.read_csv(HISTORICAL_PATH), pd.read_csv(LATEST_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def load_supplemental_csvs() -> list[pd.DataFrame]:
+    """Load any additional CSVs, such as a constructor/team dataset, without hard-coding its filename."""
+    frames = []
+    for path in sorted(DATA_DIR.glob("*.csv")):
+        if path.name in TEAM_FILE_EXCLUSIONS:
+            continue
+        try:
+            frame = pd.read_csv(path)
+            frame.attrs["source_file"] = path.name
+            frames.append(frame)
+        except Exception:
+            continue
+    return frames
 
 
 def canonicalize(historical: pd.DataFrame, latest: pd.DataFrame) -> pd.DataFrame:
@@ -276,33 +295,56 @@ def detect_constructor_column(*frames: pd.DataFrame) -> str | None:
     return None
 
 
-def constructor_frame(historical: pd.DataFrame, latest: pd.DataFrame, column: str) -> pd.DataFrame:
+def constructor_frame(*raw_frames: pd.DataFrame) -> pd.DataFrame:
     frames = []
-    if column in historical.columns:
-        h = historical.copy()
-        h["Season"] = pd.to_numeric(h["year"], errors="coerce")
-        h["Team"] = h[column].astype(str)
-        h["Points"] = _coalesce(h, ["championship_points", "total_points"])
-        h["Wins"] = _coalesce(h, ["wins"])
-        h["Podiums"] = _coalesce(h, ["podiums"])
-        h["AvgFinish"] = _coalesce(h, ["average_finish"], np.nan)
-        frames.append(h[["Season", "Team", "Points", "Wins", "Podiums", "AvgFinish"]])
-    if column in latest.columns:
-        r = latest.copy()
-        r["Season"] = pd.to_numeric(r["Season"], errors="coerce")
-        r["Team"] = r[column].astype(str)
-        r["Points"] = _coalesce(r, ["TotalPoints"])
-        r["Wins"] = _coalesce(r, ["Wins"])
-        r["Podiums"] = _coalesce(r, ["Podiums"])
-        r["AvgFinish"] = _coalesce(r, ["AverageFinish"], np.nan)
-        frames.append(r[["Season", "Team", "Points", "Wins", "Podiums", "AvgFinish"]])
+    for raw in raw_frames:
+        column = detect_constructor_column(raw)
+        if not column:
+            continue
+        work = raw.copy()
+        season_col = "Season" if "Season" in work.columns else "year" if "year" in work.columns else None
+        if season_col:
+            work["Season"] = pd.to_numeric(work[season_col], errors="coerce")
+        else:
+            source_year = re.search(r"(?:19|20)\d{2}", str(raw.attrs.get("source_file", "")))
+            if "Team" not in work.columns or not source_year:
+                continue
+            work["Season"] = int(source_year.group(0))
+        work["Team"] = work[column].astype(str).str.strip()
+        work["Points"] = _coalesce(work, ["TotalPoints", "total_points", "championship_points", "Points", "Team Points", "team_points"])
+        work["Wins"] = _coalesce(work, ["Wins", "wins"])
+        work["Podiums"] = _coalesce(work, ["Podiums", "podiums"])
+        work["AvgFinish"] = _coalesce(work, ["AverageFinish", "average_finish", "AvgFinish"], np.nan)
+        frames.append(work[["Season", "Team", "Points", "Wins", "Podiums", "AvgFinish"]])
     if not frames:
         return pd.DataFrame()
     all_rows = pd.concat(frames, ignore_index=True)
     return all_rows.groupby(["Season", "Team"], as_index=False).agg({"Points": "sum", "Wins": "sum", "Podiums": "sum", "AvgFinish": "mean"})
 
 
-def forecast_constructors(teams: pd.DataFrame, target_year: int) -> tuple[pd.DataFrame, int]:
+@st.cache_resource(show_spinner=False)
+def train_constructor_model(teams: pd.DataFrame) -> tuple[Pipeline | None, dict]:
+    """Train a team-level next-season points model when constructor data is available."""
+    if teams.empty or not set(TEAM_FEATURES).issubset(teams.columns):
+        return None, {"samples": 0, "status": "no constructor data"}
+    work = teams.copy().sort_values(["Team", "Season"])
+    lookup = work[["Team", "Season", "Points"]].rename(columns={"Points": "next_points"}).copy()
+    lookup["Season"] = lookup["Season"] - 1
+    work = work.merge(lookup, on=["Team", "Season"], how="left")
+    X = work[TEAM_FEATURES].apply(pd.to_numeric, errors="coerce")
+    y = pd.to_numeric(work["next_points"], errors="coerce")
+    valid = y.notna()
+    if int(valid.sum()) < 10:
+        return None, {"samples": int(valid.sum()), "status": "not enough linked team seasons"}
+    model = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("model", RandomForestRegressor(n_estimators=180, max_depth=10, min_samples_leaf=1, random_state=42, n_jobs=-1)),
+    ])
+    model.fit(X.loc[valid], y.loc[valid])
+    return model, {"samples": int(valid.sum()), "status": "ready"}
+
+
+def forecast_constructors(teams: pd.DataFrame, target_year: int, model: Pipeline | None = None) -> tuple[pd.DataFrame, int]:
     if teams.empty:
         return teams, target_year - 1
     prior = teams[teams["Season"] == target_year - 1]
@@ -311,7 +353,11 @@ def forecast_constructors(teams: pd.DataFrame, target_year: int) -> tuple[pd.Dat
     if prior.empty:
         prior = teams[teams["Season"] == target_year]
     out = prior.copy()
-    out["PredictedPoints"] = out["Points"] + out["Wins"] * 5 + out["Podiums"] * 1.5
+    if model is not None:
+        learned = model.predict(out[TEAM_FEATURES].apply(pd.to_numeric, errors="coerce"))
+        out["PredictedPoints"] = np.maximum(0, 0.78 * learned + 0.22 * out["Points"].to_numpy())
+    else:
+        out["PredictedPoints"] = out["Points"] + out["Wins"] * 5 + out["Podiums"] * 1.5
     out["Probability"] = relative_probabilities(out["PredictedPoints"])
     return out.sort_values("PredictedPoints", ascending=False).reset_index(drop=True), int(prior["Season"].iloc[0]) if not prior.empty else target_year
 
@@ -356,7 +402,7 @@ st.markdown(
     """
 <div class='hero'>
   <div class='hero-kicker'>Race control / predictive telemetry</div>
-  <h1>F1 CHAMPIONSHIP<br>PREDICTOR SUITE</h1>
+  <h1>FORMULA ONE<br>CHAMPIONSHIP PREDICTOR</h1>
   <p>Run the season before lights out. Forecast the championship, inspect driver form, and stress-test the points system with an explainable Scikit-Learn model.</p>
   <div class='car-card' aria-label='Animated stylized racing car card'></div>
 </div>
@@ -366,23 +412,28 @@ st.markdown(
 
 try:
     historical_raw, latest_raw = load_raw_data()
+    supplemental_raw = load_supplemental_csvs()
     canonical = canonicalize(historical_raw, latest_raw)
 except Exception as exc:
     st.error(f"Data loading failed: {exc}")
     st.stop()
 
 model, model_metrics = train_driver_model(historical_raw)
-constructor_column = detect_constructor_column(historical_raw, latest_raw)
+data_frames = [historical_raw, latest_raw, *supplemental_raw]
+constructor_column = detect_constructor_column(*data_frames)
+teams = constructor_frame(*data_frames)
+team_model, team_metrics = train_constructor_model(teams)
+constructor_results_loaded = any({"constructorId", "raceId"}.issubset(frame.columns) for frame in supplemental_raw)
 
 all_seasons = sorted({int(x) for x in canonical["Season"].dropna().unique()})
 min_year = 1950
-max_year = 2025
+max_year = 2026
 all_drivers = sorted(canonical["Driver"].dropna().unique().tolist())
 preferred_driver = "Max Verstappen" if "Max Verstappen" in all_drivers else all_drivers[0]
 team_options = ["No constructor field detected"]
 if constructor_column:
     team_values = []
-    for frame in (historical_raw, latest_raw):
+    for frame in data_frames:
         if constructor_column in frame.columns:
             team_values.extend(frame[constructor_column].dropna().astype(str).unique().tolist())
     team_options = sorted(set(team_values)) or team_options
@@ -390,7 +441,7 @@ if constructor_column:
 with st.sidebar:
     st.markdown("<div class='section-kicker'>Controls / inputs</div>", unsafe_allow_html=True)
     st.markdown("### Forecast setup")
-    selected_year = st.slider("Year", min_value=min_year, max_value=max_year, value=min(max_year, 2025), step=1)
+    selected_year = st.slider("Year", min_value=min_year, max_value=max_year, value=max_year, step=1)
     selected_driver = st.selectbox("Driver", all_drivers, index=all_drivers.index(preferred_driver))
     selected_team = st.selectbox("Constructor / Team", team_options)
     st.divider()
@@ -480,11 +531,13 @@ with constructor_tab:
     st.markdown("<div class='section-kicker'>Module C / constructor forecast</div>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Constructor's Cup</div>", unsafe_allow_html=True)
     if not constructor_column:
-        st.markdown("<div class='alert-strip'><strong>Constructor data not detected.</strong><br>The supplied historical and supplemental CSVs contain driver-season fields but no constructor/team column. The selector is kept in the interface and the forecasting code is schema-ready; add a column named <code>constructor</code>, <code>constructor_name</code>, <code>team</code>, or <code>team_name</code> to activate team predictions.</div>", unsafe_allow_html=True)
-        st.markdown("<div class='panel fine-print'>No team affiliations are fabricated from driver names. This keeps the training data honest and makes the constructor module immediately usable when a team field is added.</div>", unsafe_allow_html=True)
+        if constructor_results_loaded:
+            st.markdown("<div class='alert-strip'><strong>Constructor results file detected, but it is results-only.</strong><br><code>constructor_results.csv</code> contains race/constructor IDs and points, but no season or constructor-name fields. Add matching <code>races.csv</code> and <code>constructors.csv</code> files, or a team-season CSV with <code>Season</code>/<code>year</code> plus <code>constructor</code>/<code>team</code>, to activate named 1950–2026 team forecasts.</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='alert-strip'><strong>Constructor data not detected.</strong><br>The supplied driver files contain no constructor/team column. The selector is kept in the interface and the forecasting code is schema-ready; add a column named <code>constructor</code>, <code>constructor_name</code>, <code>team</code>, or <code>team_name</code> to activate team predictions.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='panel fine-print'>No team affiliations are fabricated from driver names. Once named team-season data is available, the app trains a dedicated next-season constructor model and uses it for team rankings and filters.</div>", unsafe_allow_html=True)
     else:
-        teams = constructor_frame(historical_raw, latest_raw, constructor_column)
-        team_forecast, team_source_year = forecast_constructors(teams, selected_year)
+        team_forecast, team_source_year = forecast_constructors(teams, selected_year, team_model)
         team_champion = team_forecast.iloc[0] if not team_forecast.empty else None
         if team_champion is not None:
             c1, c2, c3 = st.columns(3)

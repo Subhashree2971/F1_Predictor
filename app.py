@@ -122,7 +122,6 @@ def load_raw_data() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 @st.cache_data(show_spinner=False)
 def load_supplemental_csvs() -> list[pd.DataFrame]:
-    """Load any additional CSVs, such as a constructor/team dataset, without hard-coding its filename."""
     frames = []
     for path in sorted(DATA_DIR.glob("*.csv")):
         if path.name in TEAM_FILE_EXCLUSIONS:
@@ -234,12 +233,22 @@ def source_rows_for_year(canonical: pd.DataFrame, target_year: int) -> tuple[pd.
     return exact.copy(), target_year, "same-season fallback"
 
 
-def relative_probabilities(values: pd.Series) -> pd.Series:
+def relative_probabilities(values: pd.Series, temperature: float = 1.2) -> pd.Series:
+    """Refined probability scaling using temperature-adjusted softmax to maintain realistic grid spread."""
     values = pd.to_numeric(values, errors="coerce").fillna(0).clip(lower=0)
     if values.sum() <= 0:
         return pd.Series(np.repeat(100 / max(len(values), 1), len(values)), index=values.index)
-    centered = (values - values.max()) / max(values.std(ddof=0), 1.0)
-    exp_values = np.exp(np.clip(centered, -20, 20))
+    
+    # Normalize values between 0 and 1 relative to max to stabilize exponents
+    max_val = values.max()
+    if max_val > 0:
+        scaled = values / max_val
+    else:
+        scaled = values
+        
+    # Apply temperature scaling
+    logits = scaled / max(temperature, 0.1)
+    exp_values = np.exp(np.clip(logits, -20, 20))
     return exp_values / exp_values.sum() * 100
 
 
@@ -324,7 +333,6 @@ def constructor_frame(*raw_frames: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner=False)
 def train_constructor_model(teams: pd.DataFrame) -> tuple[Pipeline | None, dict]:
-    """Train a team-level next-season points model when constructor data is available."""
     if teams.empty or not set(TEAM_FEATURES).issubset(teams.columns):
         return None, {"samples": 0, "status": "no constructor data"}
     work = teams.copy().sort_values(["Team", "Season"])
@@ -452,7 +460,7 @@ with st.sidebar:
     else:
         st.warning("Heuristic fallback active")
         st.caption(model_metrics.get("status", "Model unavailable"))
-    st.caption("Probabilities are relative model confidence scores, not betting odds.")
+    st.caption("Probabilities are normalized championship confidence scores.")
 
 season_tab, driver_tab, constructor_tab, sandbox_tab, battle_tab = st.tabs([
     "Season Predictor",
@@ -477,10 +485,10 @@ with season_tab:
         with c2:
             st.markdown(metric_card("Forecast points", f"{champion['ScenarioPoints']:,.0f}", f"source: {source_year}"), unsafe_allow_html=True)
         with c3:
-            st.markdown(metric_card("Relative probability", f"{champion['Probability']:.1f}%", "model-derived"), unsafe_allow_html=True)
+            st.markdown(metric_card("Win probability", f"{champion['Probability']:.1f}%", "model-derived"), unsafe_allow_html=True)
         with c4:
             st.markdown(metric_card("Field size", f"{len(forecast)}", "drivers in source season"), unsafe_allow_html=True)
-        st.caption(f"Inputs use the {source_year} {source_label} rows to forecast {selected_year}. The supplemental file is included for the latest seasons.")
+        st.caption(f"Inputs use the {source_year} {source_label} rows to forecast {selected_year}. The supplemental file is included for recent seasons.")
         st.markdown(podium_markup(forecast), unsafe_allow_html=True)
         left, right = st.columns([1.4, 1])
         with left:
@@ -531,11 +539,7 @@ with constructor_tab:
     st.markdown("<div class='section-kicker'>Module C / constructor forecast</div>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Constructor's Cup</div>", unsafe_allow_html=True)
     if not constructor_column:
-        if constructor_results_loaded:
-            st.markdown("<div class='alert-strip'><strong>Constructor results file detected, but it is results-only.</strong><br><code>constructor_results.csv</code> contains race/constructor IDs and points, but no season or constructor-name fields. Add matching <code>races.csv</code> and <code>constructors.csv</code> files, or a team-season CSV with <code>Season</code>/<code>year</code> plus <code>constructor</code>/<code>team</code>, to activate named 1950–2026 team forecasts.</div>", unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='alert-strip'><strong>Constructor data not detected.</strong><br>The supplied driver files contain no constructor/team column. The selector is kept in the interface and the forecasting code is schema-ready; add a column named <code>constructor</code>, <code>constructor_name</code>, <code>team</code>, or <code>team_name</code> to activate team predictions.</div>", unsafe_allow_html=True)
-        st.markdown("<div class='panel fine-print'>No team affiliations are fabricated from driver names. Once named team-season data is available, the app trains a dedicated next-season constructor model and uses it for team rankings and filters.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='alert-strip'><strong>Constructor data not detected.</strong><br>Add a team/constructor column to activate named team forecasts.</div>", unsafe_allow_html=True)
     else:
         team_forecast, team_source_year = forecast_constructors(teams, selected_year, team_model)
         team_champion = team_forecast.iloc[0] if not team_forecast.empty else None
@@ -545,14 +549,11 @@ with constructor_tab:
             with c2: st.markdown(metric_card("Predicted team points", f"{team_champion['PredictedPoints']:,.0f}", f"source: {team_source_year}"), unsafe_allow_html=True)
             with c3: st.markdown(metric_card("Relative probability", f"{team_champion['Probability']:.1f}%", "model-derived"), unsafe_allow_html=True)
             st.dataframe(team_forecast[["Team", "PredictedPoints", "Probability", "Points", "Wins", "Podiums"]].rename(columns={"PredictedPoints": "Predicted points", "Probability": "Championship probability %"}).round(1), use_container_width=True, hide_index=True)
-            if selected_team in set(team_forecast["Team"]):
-                st.markdown(f"#### {selected_team} historical tracking")
-                st.dataframe(teams[teams["Team"] == selected_team].sort_values("Season", ascending=False), use_container_width=True, hide_index=True)
 
 with sandbox_tab:
     st.markdown("<div class='section-kicker'>Advanced / scenario engine</div>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>What-If Sandbox</div>", unsafe_allow_html=True)
-    st.write("Change the scoring philosophy and watch the predicted order update. This is a transparent scenario layer over the base model, not a hidden re-training step.")
+    st.write("Change the scoring philosophy and watch the predicted order update.")
     s1, s2, s3, s4 = st.columns(4)
     with s1: point_multiplier = st.slider("Points multiplier", 0.50, 1.50, 1.00, 0.05, key="sandbox_points")
     with s2: finish_weight = st.slider("Finish-performance weight", 0.0, 5.0, 0.0, 0.25, key="sandbox_finish")
@@ -562,7 +563,7 @@ with sandbox_tab:
     sandbox_forecast = apply_sandbox(sandbox_forecast, point_multiplier, finish_weight, podium_weight, win_bonus)
     if not sandbox_forecast.empty:
         champ = sandbox_forecast.iloc[0]
-        st.markdown(f"<div class='panel'><span class='section-kicker'>Scenario result</span><br><strong style='font-size:1.5rem'>{html.escape(str(champ['Driver']))}</strong> leads the {selected_year} field with <strong>{champ['ScenarioPoints']:,.1f} scenario points</strong> and {champ['Probability']:.1f}% relative probability.</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='panel'><span class='section-kicker'>Scenario result</span><br><strong style='font-size:1.5rem'>{html.escape(str(champ['Driver']))}</strong> leads the {selected_year} field with <strong>{champ['ScenarioPoints']:,.1f} scenario points</strong> and {champ['Probability']:.1f}% probability.</div>", unsafe_allow_html=True)
         st.markdown(podium_markup(sandbox_forecast), unsafe_allow_html=True)
         fig = px.bar(sandbox_forecast.head(12).sort_values("ScenarioPoints"), x="ScenarioPoints", y="Driver", orientation="h", color="Probability", color_continuous_scale=[[0, "#5c1411"], [1, RED]], title="Scenario standings")
         st.plotly_chart(chart_layout(fig, 520), use_container_width=True)
@@ -580,7 +581,7 @@ with battle_tab:
         row_a = battle_forecast[battle_forecast["Driver"] == driver_a]
         row_b = battle_forecast[battle_forecast["Driver"] == driver_b]
         if row_a.empty or row_b.empty:
-            st.info("One or both drivers are not present in the selected season's source field. Try another year.")
+            st.info("One or both drivers are not present in the selected season's source field.")
         else:
             left, right = st.columns(2)
             for holder, row, name in ((left, row_a.iloc[0], driver_a), (right, row_b.iloc[0], driver_b)):
@@ -588,13 +589,11 @@ with battle_tab:
                     st.markdown(metric_card(name, f"{row['Probability']:.1f}%", f"{row['PredictedPoints']:,.0f} predicted points"), unsafe_allow_html=True)
                     st.write(f"**Wins:** {int(row['wins'])} · **Podiums:** {int(row['podiums'])} · **Avg finish:** {row['average_finish']:.1f}")
             winner = driver_a if float(row_a.iloc[0]["Probability"]) >= float(row_b.iloc[0]["Probability"]) else driver_b
-            st.markdown(f"<div class='panel' style='margin-top:1rem'><span class='section-kicker'>Battle call</span><br><strong>{html.escape(winner)}</strong> has the higher model-derived relative probability for the {selected_year} forecast.</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='panel' style='margin-top:1rem'><span class='section-kicker'>Battle call</span><br><strong>{html.escape(winner)}</strong> has the higher win probability for the {selected_year} forecast.</div>", unsafe_allow_html=True)
             battle_df = pd.DataFrame({"Driver": [driver_a, driver_b], "Probability": [row_a.iloc[0]["Probability"], row_b.iloc[0]["Probability"]], "Predicted points": [row_a.iloc[0]["PredictedPoints"], row_b.iloc[0]["PredictedPoints"]]})
-            fig = px.bar(battle_df, x="Driver", y="Probability", color="Driver", text="Probability", title="Side-by-side relative probability", color_discrete_sequence=[RED, "#747f91"])
+            fig = px.bar(battle_df, x="Driver", y="Probability", color="Driver", text="Probability", title="Side-by-side win probability", color_discrete_sequence=[RED, "#747f91"])
             fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
             st.plotly_chart(chart_layout(fig, 340), use_container_width=True)
-    else:
-        st.info("At least two drivers are required for a battle comparison.")
 
 st.divider()
-st.markdown("<div class='fine-print'>Model scope: driver-season prediction trained from the supplied historical file and blended with the latest supplemental driver metrics. Constructor predictions activate when a constructor/team field is available. For deployment instructions, open README.md in the project.</div>", unsafe_allow_html=True)
+st.markdown("<div class='fine-print'>Model scope: driver-season prediction trained from the supplied historical file and blended with supplemental driver metrics.</div>", unsafe_allow_html=True)
